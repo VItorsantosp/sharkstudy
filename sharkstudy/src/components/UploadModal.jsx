@@ -70,7 +70,7 @@ export function UploadModal({ onClose }) {
         category_id: formData.category_id,
         difficulty_level: formData.difficulty,
         file_url: publicUrl,
-        owner_id: user.id,
+        uploader_id: user.id,
         status: 'approved' // Definimos como aprovado direto para teste
       });
 
