@@ -1,181 +1,186 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabaseClient';
-import { X, UploadCloud, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
-
-// Mapeamento simples de IDs (ajuste de acordo com os IDs da sua tabela 'categories' no Supabase)
-const CATEGORY_MAP = {
-  1: 'Matemática',
-  2: 'Física',
-  3: 'Biologia',
-  4: 'História',
-  5: 'Programação'
-};
+import { X, Upload, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 
 export function UploadModal({ onClose }) {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [error, setError] = useState(null);
+  
+  const [categories, setCategories] = useState([]);
+  const [formData, setFormData] = useState({
+    title: '',
+    author: '',
+    category_id: '',
+    difficulty: 'Iniciante',
+    file: null
+  });
 
-  // Estados do Formulário
-  const [title, setTitle] = useState('');
-  const [author, setAuthor] = useState('');
-  const [categoryId, setCategoryId] = useState('1');
-  const [difficulty, setDifficulty] = useState('iniciante');
-  const [coverUrl, setCoverUrl] = useState('');
-  const [pdfFile, setPdfFile] = useState(null);
+  // 1. Carregar categorias do banco
+  useEffect(() => {
+    async function fetchCategories() {
+      const { data } = await supabase.from('categories').select('*');
+      if (data) setCategories(data);
+    }
+    fetchCategories();
+  }, []);
 
   const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file && file.type !== 'application/pdf') {
-      setErrorMsg('Por favor, envie apenas arquivos PDF.');
-      setPdfFile(null);
-      return;
+    const selectedFile = e.target.files[0];
+    if (selectedFile && selectedFile.type === 'application/pdf') {
+      setFormData({ ...formData, file: selectedFile });
+      setError(null);
+    } else {
+      setError('Por favor, selecione um arquivo PDF válido.');
     }
-    setErrorMsg('');
-    setPdfFile(file);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!pdfFile) {
-      setErrorMsg('O arquivo PDF é obrigatório.');
-      return;
-    }
+    if (!formData.file) return setError('Selecione um arquivo!');
 
     try {
       setLoading(true);
-      setErrorMsg('');
+      setError(null);
 
-      // 1. Fazer o Upload do PDF para o Storage do Supabase
-      // Criamos um nome único para evitar que arquivos com o mesmo nome se sobrescrevam
-      const fileName = `${Date.now()}-${pdfFile.name.replace(/\s+/g, '-')}`;
-      
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('pdfs') // O nome do bucket que criamos no Passo 1
-        .upload(fileName, pdfFile);
+      const user = (await supabase.auth.getUser()).data.user;
+      if (!user) throw new Error('Você precisa estar logado para enviar.');
 
-      if (uploadError) throw new Error('Falha ao enviar o arquivo PDF.');
+      // --- PASSO 1: Limpar o nome do arquivo para evitar Erro 400 ---
+      const fileExt = formData.file.name.split('.').pop();
+      const cleanFileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const filePath = `${cleanFileName}`;
 
-      // 2. Obter a URL pública do PDF gerado
-      const { data: publicUrlData } = supabase.storage
+      // --- PASSO 2: Upload para o Storage (Bucket 'pdfs') ---
+      const { error: uploadError } = await supabase.storage
         .from('pdfs')
-        .getPublicUrl(fileName);
-      
-      const pdfUrl = publicUrlData.publicUrl;
+        .upload(filePath, formData.file);
 
-      // 3. Salvar as informações no banco de dados
-      // NOTA: Como você não tem login ainda, não passaremos o uploader_id. 
-      // O RLS precisa estar relaxado para inserções anônimas para isso funcionar agora.
-      const { error: dbError } = await supabase
-        .from('books')
-        .insert({
-          title,
-          author,
-          category_id: parseInt(categoryId),
-          difficulty_level: difficulty,
-          file_url: pdfUrl,
-          cover_url: coverUrl || 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=400', // Capa genérica se vazio
-          // status vai automaticamente como 'pending' por padrão no SQL
-        });
+      if (uploadError) throw uploadError;
 
-      if (dbError) throw new Error('Falha ao salvar as informações do livro.');
+      // --- PASSO 3: Obter a URL Pública ---
+      const { data: { publicUrl } } = supabase.storage
+        .from('pdfs')
+        .getPublicUrl(filePath);
 
-      // Sucesso!
+      // --- PASSO 4: Salvar na Tabela 'books' ---
+      const { error: dbError } = await supabase.from('books').insert({
+        title: formData.title,
+        author: formData.author,
+        category_id: formData.category_id,
+        difficulty_level: formData.difficulty,
+        file_url: publicUrl,
+        owner_id: user.id,
+        status: 'approved' // Definimos como aprovado direto para teste
+      });
+
+      if (dbError) throw dbError;
+
       setSuccess(true);
-      
-      // Fecha o modal após 2 segundos
       setTimeout(() => {
         onClose();
+        window.location.reload(); // Recarrega para mostrar o novo livro
       }, 2000);
 
-    } catch (error) {
-      setErrorMsg(error.message);
+    } catch (err) {
+      console.error('Erro no Upload:', err);
+      setError(err.message || 'Erro ao enviar o arquivo.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/80 backdrop-blur-sm p-4">
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden relative">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <div className="bg-gray-900 border border-gray-800 w-full max-w-md rounded-3xl overflow-hidden shadow-2xl">
         
-        {/* Cabeçalho do Modal */}
-        <div className="flex items-center justify-between p-6 border-b border-gray-800 bg-gray-900/50">
-          <h2 className="text-xl font-bold text-white font-serif flex items-center gap-2">
-            <UploadCloud size={24} className="text-blue-400" />
-            Contribuir com Material
-          </h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">
+        <div className="p-6 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
+          <h2 className="text-xl font-bold text-white font-serif">Enviar Material</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
             <X size={20} />
           </button>
         </div>
 
-        {/* Corpo do Modal */}
         <div className="p-6">
           {success ? (
-            <div className="flex flex-col items-center justify-center py-10 text-center">
-              <CheckCircle size={60} className="text-green-500 mb-4 animate-bounce" />
-              <h3 className="text-xl font-bold text-white mb-2">Material Enviado!</h3>
-              <p className="text-gray-400">O seu PDF foi enviado para a fila de moderação e estará disponível em breve.</p>
+            <div className="py-10 text-center space-y-4">
+              <div className="flex justify-center text-green-500"><CheckCircle size={60} /></div>
+              <p className="text-white font-bold">Livro enviado com sucesso!</p>
+              <p className="text-gray-500 text-sm">Atualizando o acervo...</p>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            <form onSubmit={handleSubmit} className="space-y-4">
               
-              {/* Título e Autor */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Título</label>
-                  <input required type="text" value={title} onChange={e => setTitle(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500" placeholder="Ex: Cálculo I" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Autor</label>
-                  <input required type="text" value={author} onChange={e => setAuthor(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500" placeholder="Nome do autor" />
-                </div>
+              <div>
+                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Título da Obra</label>
+                <input 
+                  required
+                  className="w-full bg-gray-800/50 border border-gray-700 rounded-xl px-4 py-3 text-white outline-none focus:border-blue-500 transition-all text-sm"
+                  placeholder="Ex: Dom Casmurro"
+                  onChange={(e) => setFormData({...formData, title: e.target.value})}
+                />
               </div>
 
-              {/* Categoria e Dificuldade */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Matéria</label>
-                  <select value={categoryId} onChange={e => setCategoryId(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500">
-                    {Object.entries(CATEGORY_MAP).map(([id, name]) => (
-                      <option key={id} value={id}>{name}</option>
+                  <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Autor</label>
+                  <input 
+                    required
+                    className="w-full bg-gray-800/50 border border-gray-700 rounded-xl px-4 py-3 text-white outline-none focus:border-blue-500 transition-all text-sm"
+                    placeholder="Machado de Assis"
+                    onChange={(e) => setFormData({...formData, author: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Matéria</label>
+                  <select 
+                    required
+                    className="w-full bg-gray-800/50 border border-gray-700 rounded-xl px-4 py-3 text-white outline-none focus:border-blue-500 transition-all text-sm appearance-none"
+                    onChange={(e) => setFormData({...formData, category_id: e.target.value})}
+                  >
+                    <option value="">Selecionar...</option>
+                    {categories.map(cat => (
+                      <option key={cat.id} value={cat.id}>{cat.name}</option>
                     ))}
                   </select>
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nível</label>
-                  <select value={difficulty} onChange={e => setDifficulty(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500">
-                    <option value="iniciante">Iniciante</option>
-                    <option value="intermediário">Intermediário</option>
-                    <option value="avançado">Avançado</option>
-                  </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-2">Arquivo PDF</label>
+                <div className="relative group">
+                  <input 
+                    type="file" 
+                    accept=".pdf"
+                    onChange={handleFileChange}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                  />
+                  <div className={`
+                    w-full border-2 border-dashed rounded-2xl py-8 flex flex-col items-center justify-center transition-all
+                    ${formData.file ? 'border-blue-500 bg-blue-500/5' : 'border-gray-700 group-hover:border-gray-600 bg-gray-800/30'}
+                  `}>
+                    <Upload className={formData.file ? 'text-blue-400' : 'text-gray-600'} size={24} />
+                    <p className="mt-2 text-[11px] font-bold text-gray-400 uppercase tracking-tight">
+                      {formData.file ? formData.file.name : 'Clique ou arraste o PDF'}
+                    </p>
+                  </div>
                 </div>
               </div>
 
-              {/* Capa (URL) */}
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">URL da Capa (Opcional)</label>
-                <input type="url" value={coverUrl} onChange={e => setCoverUrl(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 text-sm" placeholder="https://link-da-imagem.com/foto.jpg" />
-              </div>
-
-              {/* Upload de Arquivo PDF */}
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Arquivo PDF</label>
-                <input required type="file" accept=".pdf" onChange={handleFileChange} className="w-full text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-500/10 file:text-blue-400 hover:file:bg-blue-500/20 transition-all border border-gray-700 rounded-lg bg-gray-800" />
-              </div>
-
-              {/* Mensagem de Erro */}
-              {errorMsg && (
-                <div className="flex items-center gap-2 text-red-400 bg-red-500/10 p-3 rounded-lg text-sm border border-red-500/20">
-                  <AlertCircle size={16} /> {errorMsg}
+              {error && (
+                <div className="flex items-center gap-2 text-red-400 text-xs bg-red-400/10 p-3 rounded-xl border border-red-400/20">
+                  <AlertCircle size={14} /> {error}
                 </div>
               )}
 
-              {/* Botão de Envio */}
-              <button disabled={loading} type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg mt-4 transition-colors flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                {loading ? <Loader2 size={20} className="animate-spin" /> : 'Enviar para Moderação'}
+              <button 
+                disabled={loading}
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-blue-900/20 flex items-center justify-center gap-2 mt-4"
+              >
+                {loading ? <Loader2 className="animate-spin" size={20} /> : 'Finalizar Upload'}
               </button>
+
             </form>
           )}
         </div>
